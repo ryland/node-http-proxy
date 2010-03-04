@@ -5,7 +5,7 @@ var sys = require('sys'),
 exports.filteredHeaders = ['proxy-connection', 'set-cookie', 'accept-encoding', 
 'connection', 'keep-alive', 'proxy-authenticate', 'upgrade', 'proxy-authorization', 'trailers', 'transfer-encoding'];
 
-// return a copy of headers that have been sanitized
+// return a headers with all filteredHeaders removed
 function cleanHeaders(h) {
   cleaned = {};
   for(var p in h) {
@@ -22,10 +22,10 @@ function responseContentType(headers) {
         (headers['content-type'].indexOf("text/") == -1)) {
       return "binary";
     } else {
-      return "ascii"
+      return "utf8"
     }
   } catch(e) {
-    return "ascii";
+    return "utf8";
   }
 }
 
@@ -33,43 +33,45 @@ exports.createServer = function(handler) {
   return http.createServer(function (req, res) {
     var client = http.createClient(req.headers.port || 80, req.headers.host),
         upstream_req = client.request(req.method.toUpperCase(), req.url, cleanHeaders(req.headers)),
-        req_buffer = "", 
-        res_buffer = "";
+        res_buffer = "",
+        sent_headers = false;
 
-    req.addListener("body", function(chunk) {
-      upstream_req.sendBody(chunk);
+    req.addListener("data", function(chunk) {
+      upstream_req.write(chunk);
     });
 
-    upstream_req.finish(function(upstream_res) {
+    upstream_req.addListener('response', function(upstream_res) {
+      var encoding = responseContentType(upstream_res.headers);
+
       // close connection
       upstream_res.headers['connection'] = 'close';
       upstream_res.headers['proxy-connection'] = 'close';
-      res.sendHeader(upstream_res.statusCode, upstream_res.headers);
 
-      var encoding = responseContentType(upstream_res.headers);
-
-      upstream_res.setBodyEncoding(encoding);
-
-      upstream_res.addListener("body", function(chunk) {
+      upstream_res.addListener("data", function(chunk) {
         if (handler !== undefined) {
           // handler will need full body
           res_buffer = res_buffer + chunk;
         } else {
-          res.sendBody(chunk, encoding);
+          if (!sent_headers) { 
+            res.writeHeader(upstream_res.statusCode, upstream_res.headers);
+            sent_headers = true;
+          }
+          res.write(chunk, encoding);
         }
       });
 
-      upstream_res.addListener("complete", function() {
+      upstream_res.addListener("end", function() {
         if (handler !== undefined) {
-          handler(res_buffer, upstream_res.headers).addCallback(
-            function(body) { 
-              res.sendBody(body, encoding);
-              res.finish();
+          handler(upstream_res.headers, res_buffer, function(headers, body) {
+              res.writeHeader(upstream_res.statusCode, headers);
+              res.write(body, encoding);
+              res.close();
             });
         } else {
-          res.finish();
+          res.close();
         }
       });
     });
+    upstream_req.close();
   });
 }
